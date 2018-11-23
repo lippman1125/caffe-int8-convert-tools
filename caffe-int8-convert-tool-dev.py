@@ -31,6 +31,8 @@ import caffe
 import caffe.proto.caffe_pb2 as caffe_pb2
 import time
 import datetime
+import random
+import tqdm
 from google.protobuf import text_format
 
 
@@ -53,6 +55,9 @@ def parse_args():
                         help='enable the group scale', type=int, default=0)        
     parser.add_argument('--gpu', dest='gpu',
                         help='use gpu to forward', type=int, default=0)
+    parser.add_argument('--num', dest='num',
+                        help='number of pictures to calibrate', type=int, default=2000)
+ 
 
     args = parser.parse_args()
     return args, parser
@@ -189,6 +194,9 @@ def compute_kl_divergence(dist_a, dist_b):
         kl_divergence: float, kl_divergence 
     """ 
     nonzero_inds = dist_a != 0
+    zero_inds_b = np.where(dist_b == 0.0)[0]
+    dist_b[zero_inds_b] = 1e-12
+ 
     return np.sum(dist_a[nonzero_inds] * np.log(dist_a[nonzero_inds] / dist_b[nonzero_inds]))
 
 
@@ -305,7 +313,7 @@ def net_forward(net, image_path, transformer):
     start = time.clock()
     output = net.forward()
     end = time.clock()
-    print("%s forward time : %.3f s" % (image_path, end - start))
+    # print("%s forward time : %.3f s" % (image_path, end - start))
 
 
 def file_name(file_dir):
@@ -322,9 +330,22 @@ def file_name(file_dir):
         for name in files:
             file_path = root + "/" + name
             print(file_path)
-            files_path.append(file_path)
+            if file_path.split(".")[-1] == "png":
+                files_path.append(file_path)
 
-    return files_path
+        for name in dir:
+            sub_dir = root + "/" + name
+            for root_sub, dir_sub, files_sub in os.walk(sub_dir):
+                for name_sub in files_sub:
+                    file_path = root_sub + "/" + name_sub
+                    print(file_path)
+                    if file_path.split(".")[-1] == "png":
+                        files_path.append(file_path)
+    print(len(files_path))
+    
+    random.shuffle(files_path)
+
+    return files_path[0:args.num]
 
 
 def network_prepare(net, mean, norm):
@@ -376,12 +397,13 @@ def weight_quantize(net, net_file, group_on):
     for i, layer in enumerate(params.layer):
         if i == 0:
             if layer.type != "Input":
+                print(layer.type)
                 raise ValueError("First layer should be input")
 
         # find the convolution 3x3 and 1x1 layers to get out the weight_scale
         if(layer.type == "Convolution" or layer.type == "ConvolutionDepthwise"):
             kernel_size = layer.convolution_param.kernel_size[0]
-            if(kernel_size == 3 or kernel_size == 1):
+            if(kernel_size == 3 or kernel_size == 1 or kernel_size == 5 or kernel_size == 7):
                 weight_blob = net.params[layer.name][0].data
                 # initial the instance of QuantizeLayer Class lists,you can use enable group quantize to generate int8 scale for each group layer.convolution_param.group
                 if (group_on == 1):
@@ -410,9 +432,9 @@ def activation_quantize(net, transformer, images_files):
     """
     print("\nQuantize the Activation:")
     # run float32 inference on calibration dataset to find the activations range
-    for i , image in enumerate(images_files):
+    for image in tqdm.tqdm(images_files):
         net_forward(net, image, transformer)
-        print("loop stage 1 : %d" % (i))
+        # print("loop stage 1 : %d" % (i))
         # find max threshold
         for layer in quantize_layer_lists:
             blob = net.blobs[layer.blob_name].data[0].flatten()
@@ -425,15 +447,15 @@ def activation_quantize(net, transformer, images_files):
     # for each layers
     # collect histograms of activations
     print("\nCollect histograms of activations:")
-    for i, image in enumerate(images_files):
+    for image in tqdm.tqdm(images_files):
         net_forward(net, image, transformer)
-        print("loop stage 2 : %d" % (i))    
+        # print("loop stage 2 : %d" % (i))    
         start = time.clock() 
         for layer in quantize_layer_lists:
             blob = net.blobs[layer.blob_name].data[0].flatten()
             layer.initial_histograms(blob)
         end = time.clock()
-        print("add cost %.3f s" % (end - start))
+        # print("add cost %.3f s" % (end - start))
 
     # calculate threshold with KL divergence
     for layer in quantize_layer_lists:
